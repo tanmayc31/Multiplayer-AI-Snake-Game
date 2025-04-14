@@ -2,6 +2,7 @@ import socket
 import random
 import time
 import heapq  # For priority queue in A* algorithm
+from ast import literal_eval
 
 # Server configuration
 HOST = '0.0.0.0'
@@ -16,92 +17,90 @@ GRID_HEIGHT = HEIGHT // SEG_SIZE
 
 # Game state
 current_direction = "Right"
-immunity = 0
-apple_positions = []  # Track recent apple positions
+yellow_immunity = 0
+immunity_period = 6
+apple_pos = None
+yellow_head_pos = None
+red_head_pos = None
+yellow_length = 3
+red_length = 3
 
-def log(message):
-    print(f"[LOG] {message}")
+# Directions and their vector values (grid-based)
+directions = {
+    "Up": (0, -1),
+    "Down": (0, 1),
+    "Left": (-1, 0),
+    "Right": (1, 0)
+}
+
+# Opposite directions lookup
+opposite_directions = {
+    "Up": "Down",
+    "Down": "Up",
+    "Left": "Right",
+    "Right": "Left"
+}
 
 def get_center_position(rect_coords):
     """Get center of a rectangle from its coordinates."""
     x1, y1, x2, y2 = rect_coords
     return ((x1 + x2) / 2, (y1 + y2) / 2)
 
-def to_grid_position(pos):
-    """Convert pixel coordinates to grid coordinates."""
-    return (int(pos[0] // SEG_SIZE), int(pos[1] // SEG_SIZE))
-
-def to_pixel_position(grid_pos):
-    """Convert grid coordinates to pixel coordinates (center of cell)."""
-    return ((grid_pos[0] * SEG_SIZE) + (SEG_SIZE // 2), 
-            (grid_pos[1] * SEG_SIZE) + (SEG_SIZE // 2))
+def get_grid_position(center_pos):
+    """Convert center position to grid coordinates."""
+    x, y = center_pos
+    return (int(x // SEG_SIZE), int(y // SEG_SIZE))
 
 def manhattan_distance(pos1, pos2):
     """Calculate Manhattan distance between two positions."""
     return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
 
-def get_direction_from_positions(from_pos, to_pos):
-    """Determine direction from one position to another."""
-    dx = to_pos[0] - from_pos[0]
-    dy = to_pos[1] - from_pos[1]
-    
-    # Only consider significant movements (full grid cells)
-    if abs(dx) >= SEG_SIZE/2 and abs(dx) > abs(dy):
-        return "Right" if dx > 0 else "Left"
-    elif abs(dy) >= SEG_SIZE/2:
-        return "Down" if dy > 0 else "Up"
-    
-    # Default to current direction if no significant movement
-    return current_direction
-
-def is_valid_grid_position(pos):
-    """Check if a grid position is valid (within grid boundaries)."""
+def is_position_valid(pos):
+    """Check if a position is valid (within grid boundaries)."""
     x, y = pos
     return 0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT
 
-def get_neighbors(grid_pos):
-    """Get valid neighboring grid positions."""
-    x, y = grid_pos
-    neighbors = []
+def is_position_safe(pos, opponent_pos=None, has_immunity=False):
+    """Check if a position is safe (not hitting walls or opponent)."""
+    if not is_position_valid(pos):
+        return False
     
-    # Check all four directions
-    for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:  # Up, Right, Down, Left
-        new_pos = (x + dx, y + dy)
-        if is_valid_grid_position(new_pos):
-            neighbors.append(new_pos)
+    # If we have immunity, we don't need to worry about hitting the opponent
+    if has_immunity:
+        return True
     
-    return neighbors
+    # Check if we would hit the opponent
+    if opponent_pos and manhattan_distance(pos, opponent_pos) < 2:
+        return False
+    
+    return True
 
-def a_star_search(start_pos, goal_pos, opponent_pos=None, has_immunity=False):
-    """A* pathfinding algorithm to find optimal path."""
-    # Convert to grid coordinates
-    start_grid = to_grid_position(start_pos)
-    goal_grid = to_grid_position(goal_pos)
-    opponent_grid = to_grid_position(opponent_pos) if opponent_pos else None
-    
-    # If start and goal are the same, no path needed
-    if start_grid == goal_grid:
-        return []
-    
-    # Open set (priority queue: (f_score, position))
-    open_set = [(manhattan_distance(start_grid, goal_grid), 0, start_grid)]
-    heapq.heapify(open_set)
-    
-    # Closed set (visited nodes)
+def get_next_position(current_pos, direction):
+    """Get the next position if moving in the specified direction."""
+    dx, dy = directions[direction]
+    return (current_pos[0] + dx, current_pos[1] + dy)
+
+def a_star_search(start, goal, opponent_pos=None, has_immunity=False):
+    """A* search algorithm to find the optimal path."""
+    # Priority queue for open nodes
+    open_set = {start}
     closed_set = set()
     
-    # Path tracking
+    # Previous node in optimal path
     came_from = {}
     
-    # Cost from start to each node
-    g_score = {start_grid: 0}
+    # Cost from start to current node
+    g_score = {start: 0}
+    
+    # Estimated total cost from start to goal
+    f_score = {start: manhattan_distance(start, goal)}
     
     while open_set:
-        # Get node with lowest f_score
-        _, _, current = heapq.heappop(open_set)
+        # Find node with lowest f_score
+        current = min(open_set, key=lambda pos: f_score.get(pos, float('inf')))
         
         # If we've reached the goal
-        if current == goal_grid:
+        if current == goal:
             # Reconstruct path
             path = []
             while current in came_from:
@@ -110,195 +109,198 @@ def a_star_search(start_pos, goal_pos, opponent_pos=None, has_immunity=False):
             path.reverse()
             return path
         
-        # Add to closed set
+        open_set.remove(current)
         closed_set.add(current)
         
-        # Check all neighbors
-        for neighbor in get_neighbors(current):
-            # Skip if already evaluated
-            if neighbor in closed_set:
+        # Check all adjacent nodes
+        for direction, (dx, dy) in directions.items():
+            neighbor = (current[0] + dx, current[1] + dy)
+            
+            # Skip if already evaluated or not valid
+            if neighbor in closed_set or not is_position_safe(neighbor, opponent_pos, has_immunity):
                 continue
             
-            # Skip if would hit opponent (unless immune)
-            if (not has_immunity and opponent_grid and 
-                neighbor == opponent_grid):
-                continue
-            
-            # Calculate tentative g_score
+            # Tentative g_score
             tentative_g_score = g_score[current] + 1
             
-            # Check if this path is better than any previous ones
-            if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                # This path is better, record it
-                came_from[neighbor] = current
-                g_score[neighbor] = tentative_g_score
-                f_score = tentative_g_score + manhattan_distance(neighbor, goal_grid)
-                
-                # Add to open set
-                heapq.heappush(open_set, (f_score, g_score[neighbor], neighbor))
+            if neighbor not in open_set:
+                open_set.add(neighbor)
+            elif tentative_g_score >= g_score.get(neighbor, float('inf')):
+                # This is not a better path
+                continue
+            
+            # This path is the best so far
+            came_from[neighbor] = current
+            g_score[neighbor] = tentative_g_score
+            f_score[neighbor] = g_score[neighbor] + manhattan_distance(neighbor, goal)
     
     # No path found
     return []
 
-def get_next_direction(current_pos, path):
-    """Get the next direction based on the A* path."""
-    if not path:
+def get_safe_directions(current_pos, opponent_pos=None, has_immunity=False):
+    """Get list of safe directions to move in."""
+    safe_dirs = []
+    
+    for direction in directions:
+        next_pos = get_next_position(current_pos, direction)
+        if is_position_safe(next_pos, opponent_pos, has_immunity):
+            safe_dirs.append(direction)
+    
+    return safe_dirs
+
+def calculate_intercept_point(my_pos, opponent_pos, apple_pos):
+    """Calculate a point to intercept opponent on way to apple."""
+    # If opponent is closer to apple, try to intercept
+    my_dist_to_apple = manhattan_distance(my_pos, apple_pos)
+    opp_dist_to_apple = manhattan_distance(opponent_pos, apple_pos)
+    
+    if opp_dist_to_apple < my_dist_to_apple:
+        # Calculate a point between opponent and apple
+        intercept_x = (opponent_pos[0] + apple_pos[0]) // 2
+        intercept_y = (opponent_pos[1] + apple_pos[1]) // 2
+        return (intercept_x, intercept_y)
+    
+    return None
+
+def decide_move(yellow_pos, red_pos, apple_pos, has_immunity=False):
+    """Decide the next move based on current game state."""
+    global current_direction
+    
+    # Convert to grid positions
+    yellow_grid = get_grid_position(yellow_pos)
+    red_grid = get_grid_position(red_pos)
+    apple_grid = get_grid_position(apple_pos) if apple_pos else None
+    
+    # First, check safe directions to avoid immediate death
+    safe_directions = get_safe_directions(yellow_grid, red_grid, has_immunity)
+    
+    if not safe_directions:
+        print("WARNING: No safe directions available!")
+        # Emergency move: try to avoid walls at least
+        for direction in directions:
+            next_pos = get_next_position(yellow_grid, direction)
+            if is_position_valid(next_pos):
+                return direction
+        return current_direction  # As a last resort
+    
+    # Strategy 1: If we have immunity, go after the opponent
+    if has_immunity:
+        print("ATTACK MODE: We have immunity!")
+        path = a_star_search(yellow_grid, red_grid, has_immunity=True)
+        if path and len(path) > 0:
+            next_pos = path[0]
+            for direction, (dx, dy) in directions.items():
+                if (yellow_grid[0] + dx, yellow_grid[1] + dy) == next_pos:
+                    return direction
+    
+    # Strategy 2: If there's an apple, decide whether to go for it
+    if apple_grid:
+        # Calculate distances
+        yellow_to_apple = manhattan_distance(yellow_grid, apple_grid)
+        red_to_apple = manhattan_distance(red_grid, apple_grid)
+        
+        # If we're closer to the apple than opponent, go for it
+        if yellow_to_apple <= red_to_apple:
+            print(f"APPLE STRATEGY: Going for apple at {apple_grid}")
+            path = a_star_search(yellow_grid, apple_grid, red_grid, has_immunity)
+            if path and len(path) > 0:
+                next_pos = path[0]
+                for direction, (dx, dy) in directions.items():
+                    if (yellow_grid[0] + dx, yellow_grid[1] + dy) == next_pos:
+                        return direction
+        else:
+            # If opponent is closer, try to intercept them
+            intercept_point = calculate_intercept_point(yellow_grid, red_grid, apple_grid)
+            if intercept_point:
+                print(f"INTERCEPT STRATEGY: Intercepting at {intercept_point}")
+                path = a_star_search(yellow_grid, intercept_point, red_grid, has_immunity)
+                if path and len(path) > 0:
+                    next_pos = path[0]
+                    for direction, (dx, dy) in directions.items():
+                        if (yellow_grid[0] + dx, yellow_grid[1] + dy) == next_pos:
+                            return direction
+    
+    # Strategy 3: If we're close to opponent and longer, try to encircle them
+    if manhattan_distance(yellow_grid, red_grid) < 10 and yellow_length > red_length:
+        print("ENCIRCLE STRATEGY: Trying to trap opponent")
+        # Try to find a position that blocks opponent
+        for direction, (dx, dy) in directions.items():
+            # Look for a position that gets us closer to opponent without colliding
+            test_pos = (yellow_grid[0] + dx, yellow_grid[1] + dy)
+            if is_position_safe(test_pos, red_grid, has_immunity) and manhattan_distance(test_pos, red_grid) < manhattan_distance(yellow_grid, red_grid):
+                return direction
+    
+    # Strategy 4: If no specific strategy, continue moving safely
+    # Prefer continuing in same direction if safe
+    if current_direction in safe_directions:
         return current_direction
     
-    # Get the next position in the path
-    next_grid_pos = path[0]
-    next_pixel_pos = to_pixel_position(next_grid_pos)
+    # Avoid reversing direction if possible
+    opposite = opposite_directions.get(current_direction)
+    forward_directions = [d for d in safe_directions if d != opposite]
+    if forward_directions:
+        return random.choice(forward_directions)
     
-    # Determine direction to that position
-    return get_direction_from_positions(current_pos, next_pixel_pos)
+    # If all else fails, choose any safe direction
+    return random.choice(safe_directions)
 
-def is_wall_collision(direction, pos):
-    """Check if moving in a direction would hit a wall."""
-    grid_pos = to_grid_position(pos)
-    x, y = grid_pos
-    
-    if direction == "Up" and y <= 0:
-        return True
-    elif direction == "Down" and y >= GRID_HEIGHT - 1:
-        return True
-    elif direction == "Left" and x <= 0:
-        return True
-    elif direction == "Right" and x >= GRID_WIDTH - 1:
-        return True
-    
-    return False
-
-def process_game_state(data_str):
-    """Process game state and decide next move using A* pathfinding."""
-    global current_direction, immunity, apple_positions
+def process_game_state(data):
+    """Process the game state and decide the next move."""
+    global current_direction, yellow_immunity, apple_pos, yellow_head_pos, red_head_pos, yellow_length, red_length
     
     try:
-        # Parse data - format: [x1, y1, x2, y2, rx1, ry1, rx2, ry2, ax, ay]
-        clean_data = data_str
-        if '[' in data_str and ']' in data_str:
-            clean_data = data_str.split('[')[1].split(']')[0]
+        # Parse data: yellow head, red head, apple
+        yx1, yy1, yx2, yy2, x1, y1, x2, y2, ax, ay = literal_eval(data)
         
-        parts = clean_data.split(',')
-        if len(parts) < 10:
-            return current_direction
+        # Get center positions
+        yellow_center = get_center_position((yx1, yy1, yx2, yy2))
+        red_center = get_center_position((x1, y1, x2, y2))
+        current_apple_pos = (ax, ay) if ax is not None and ay is not None else None
         
-        # Extract coordinates
-        try:
-            x1 = float(parts[0])
-            y1 = float(parts[1])
-            x2 = float(parts[2])
-            y2 = float(parts[3])
-            rx1 = float(parts[4])
-            ry1 = float(parts[5])
-            rx2 = float(parts[6])
-            ry2 = float(parts[7])
-            ax = float(parts[8])
-            ay = float(parts[9])
-        except ValueError:
-            log("Error parsing coordinates, using default direction")
-            return current_direction
+        # Check if an apple was eaten
+        if apple_pos and apple_pos != current_apple_pos:
+            # If the apple was at our previous position, we ate it
+            if manhattan_distance(yellow_center, apple_pos) < SEG_SIZE:
+                yellow_length += 1
+                yellow_immunity = immunity_period
+                print(f"We ate an apple! Length: {yellow_length}, Immunity: {yellow_immunity}")
+            # If the apple was at opponent's position, they ate it
+            elif manhattan_distance(red_center, apple_pos) < SEG_SIZE:
+                red_length += 1
+                print(f"Opponent ate an apple! Their length: {red_length}")
         
-        # Calculate centers
-        yellow_pos = get_center_position((x1, y1, x2, y2))
-        red_pos = get_center_position((rx1, ry1, rx2, ry2))
-        apple_pos = (ax, ay)
+        # Update current positions
+        apple_pos = current_apple_pos
+        yellow_head_pos = yellow_center
+        red_head_pos = red_center
         
-        log(f"Yellow at {yellow_pos}, Red at {red_pos}, Apple at {apple_pos}")
+        # Decide next move
+        next_move = decide_move(yellow_center, red_center, current_apple_pos, has_immunity=(yellow_immunity > 0))
         
-        # Track apple positions
-        if not apple_positions or apple_pos != apple_positions[-1]:
-            apple_positions.append(apple_pos)
-            if len(apple_positions) > 3:
-                apple_positions = apple_positions[-3:]
+        # Update current direction
+        if next_move != "Straight":
+            current_direction = next_move
         
-        # Check if we have immunity
-        if len(apple_positions) >= 2 and apple_positions[-2] != apple_positions[-1]:
-            # If we were close to the previous apple, we might have eaten it
-            if manhattan_distance(yellow_pos, apple_positions[-2]) < SEG_SIZE * 2:
-                immunity = 6  # Default immunity duration
-                log("Probably gained immunity")
+        # Decrease immunity counter if active
+        if yellow_immunity > 0:
+            yellow_immunity -= 1
         
-        # 1. If we're about to hit a wall, emergency avoidance
-        if is_wall_collision(current_direction, yellow_pos):
-            log("Wall collision detected! Emergency change")
-            
-            # Try to find a valid direction
-            for test_dir in ["Up", "Right", "Down", "Left"]:
-                if not is_wall_collision(test_dir, yellow_pos):
-                    log(f"Emergency direction: {test_dir}")
-                    current_direction = test_dir
-                    return current_direction
+        return next_move
         
-        # 2. Use A* to find path to apple
-        path = a_star_search(yellow_pos, apple_pos, red_pos, has_immunity=(immunity > 0))
-        
-        if path:
-            # Convert path to next direction
-            next_direction = get_next_direction(yellow_pos, path)
-            
-            # Verify the direction won't cause a wall collision
-            if not is_wall_collision(next_direction, yellow_pos):
-                log(f"A* path found, next direction: {next_direction}")
-                current_direction = next_direction
-                return current_direction
-            else:
-                log(f"A* suggested invalid direction {next_direction}, fallback")
-        else:
-            log("No A* path found to apple")
-        
-        # 3. If we have immunity, try to attack the opponent
-        if immunity > 0:
-            immunity -= 1
-            path_to_opponent = a_star_search(yellow_pos, red_pos, has_immunity=True)
-            
-            if path_to_opponent:
-                next_direction = get_next_direction(yellow_pos, path_to_opponent)
-                
-                if not is_wall_collision(next_direction, yellow_pos):
-                    log(f"Attacking opponent with immunity: {next_direction}")
-                    current_direction = next_direction
-                    return current_direction
-        
-        # 4. If no valid A* path, try to move toward the center
-        center_pos = (WIDTH/2, HEIGHT/2)
-        path_to_center = a_star_search(yellow_pos, center_pos, red_pos, has_immunity=(immunity > 0))
-        
-        if path_to_center:
-            next_direction = get_next_direction(yellow_pos, path_to_center)
-            
-            if not is_wall_collision(next_direction, yellow_pos):
-                log(f"Moving toward center: {next_direction}")
-                current_direction = next_direction
-                return current_direction
-        
-        # 5. Last resort: choose a random valid direction
-        valid_directions = []
-        for test_dir in ["Up", "Right", "Down", "Left"]:
-            if not is_wall_collision(test_dir, yellow_pos):
-                valid_directions.append(test_dir)
-        
-        if valid_directions:
-            next_direction = random.choice(valid_directions)
-            log(f"Random valid direction: {next_direction}")
-            current_direction = next_direction
-            return current_direction
-        
-        # Absolute fallback: continue in current direction
-        return current_direction
-    
     except Exception as e:
-        log(f"Error processing state: {e}")
-        return current_direction
+        print(f"Error processing game state: {e}")
+        return current_direction  # Fallback to current direction
 
-# Main server
+# Main server loop
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind((HOST, PORT))
     s.listen()
     print(f"Yellow Snake Server listening on {HOST}:{PORT}")
     
     while True:
-        client_sock, addr = s.accept()
-        print(f"Connection from {addr}")
+        # Accept new connections
+        client_sock, client_addr = s.accept()
+        print(f'New connection from {client_addr}')
         
         try:
             while True:
@@ -307,16 +309,22 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     break
                 
                 start_time = time.time()
-                data_str = data.decode()
-                print(f"Received: {data_str}")
+                decoded_data = data.decode()
+                print(f"Received: {decoded_data}")
                 
-                next_move = process_game_state(data_str)
+                # Process game state and determine next move
+                next_move = process_game_state(decoded_data)
+                
+                # Send the move back
                 client_sock.sendall(next_move.encode())
                 
+                # Performance monitoring
                 elapsed = time.time() - start_time
-                print(f"Sent: {next_move}, time: {elapsed:.4f}s")
-        
+                print(f"Response: {next_move}, time: {elapsed:.4f}s")
+                if elapsed > 0.8:
+                    print("WARNING: Response time approaching 1 second limit!")
+                
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error handling client: {e}")
         finally:
             client_sock.close()
