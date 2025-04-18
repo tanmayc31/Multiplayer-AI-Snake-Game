@@ -1,7 +1,6 @@
 import socket
 import random
 import time
-import heapq  # For priority queue in A* algorithm
 from ast import literal_eval
 
 # Server configuration
@@ -24,8 +23,13 @@ yellow_head_pos = None
 red_head_pos = None
 yellow_length = 3
 red_length = 3
+position_history = []
 
-# Directions and their vector values (grid-based)
+# Simple opponent body tracking
+opponent_positions = []  # List of previous opponent positions
+POSITIONS_TO_KEEP = 10    # Number of positions to keep after apple is eaten
+
+# Directions and their vector values
 directions = {
     "Up": (0, -1),
     "Down": (0, 1),
@@ -33,7 +37,7 @@ directions = {
     "Right": (1, 0)
 }
 
-# Opposite directions lookup
+# Opposite directions
 opposite_directions = {
     "Up": "Down",
     "Down": "Up",
@@ -60,17 +64,29 @@ def is_position_valid(pos):
     x, y = pos
     return 0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT
 
-def is_position_safe(pos, opponent_pos=None, has_immunity=False):
-    """Check if a position is safe (not hitting walls or opponent)."""
+def will_hit_wall(pos, direction):
+    """Check if moving in this direction would hit a wall."""
+    x, y = pos
+    dx, dy = directions[direction]
+    new_x, new_y = x + dx, y + dy
+    return not (0 <= new_x < GRID_WIDTH and 0 <= new_y < GRID_HEIGHT)
+
+def will_hit_opponent(pos):
+    """Check if a position will hit opponent's body."""
+    return pos in opponent_positions
+
+def is_position_safe(pos, has_immunity=False):
+    """Check if a position is safe."""
+    # First check boundaries - this is critical
     if not is_position_valid(pos):
         return False
     
-    # If we have immunity, we don't need to worry about hitting the opponent
+    # If we have immunity, don't worry about hitting opponent
     if has_immunity:
         return True
     
-    # Check if we would hit the opponent
-    if opponent_pos and manhattan_distance(pos, opponent_pos) < 2:
+    # Check if we would hit opponent's body
+    if will_hit_opponent(pos):
         return False
     
     return True
@@ -80,7 +96,7 @@ def get_next_position(current_pos, direction):
     dx, dy = directions[direction]
     return (current_pos[0] + dx, current_pos[1] + dy)
 
-def a_star_search(start, goal, opponent_pos=None, has_immunity=False):
+def a_star_search(start, goal, has_immunity=False):
     """A* search algorithm to find the optimal path."""
     # Priority queue for open nodes
     open_set = {start}
@@ -116,8 +132,12 @@ def a_star_search(start, goal, opponent_pos=None, has_immunity=False):
         for direction, (dx, dy) in directions.items():
             neighbor = (current[0] + dx, current[1] + dy)
             
-            # Skip if already evaluated or not valid
-            if neighbor in closed_set or not is_position_safe(neighbor, opponent_pos, has_immunity):
+            # Skip if already evaluated
+            if neighbor in closed_set:
+                continue
+                
+            # Skip if not safe (wall or opponent body)
+            if not is_position_safe(neighbor, has_immunity):
                 continue
             
             # Tentative g_score
@@ -137,50 +157,60 @@ def a_star_search(start, goal, opponent_pos=None, has_immunity=False):
     # No path found
     return []
 
-def get_safe_directions(current_pos, opponent_pos=None, has_immunity=False):
+def get_safe_directions(current_pos, has_immunity=False):
     """Get list of safe directions to move in."""
     safe_dirs = []
     
     for direction in directions:
         next_pos = get_next_position(current_pos, direction)
-        if is_position_safe(next_pos, opponent_pos, has_immunity):
+        if is_position_safe(next_pos, has_immunity):
             safe_dirs.append(direction)
     
     return safe_dirs
 
-def calculate_intercept_point(my_pos, opponent_pos, apple_pos):
-    """Calculate a point to intercept opponent on way to apple."""
-    # If opponent is closer to apple, try to intercept
-    my_dist_to_apple = manhattan_distance(my_pos, apple_pos)
-    opp_dist_to_apple = manhattan_distance(opponent_pos, apple_pos)
+def is_oscillating(history, threshold=3):
+    """Simple oscillation detection."""
+    if len(history) < 6:
+        return False
     
-    if opp_dist_to_apple < my_dist_to_apple:
-        # Calculate a point between opponent and apple
-        intercept_x = (opponent_pos[0] + apple_pos[0]) // 2
-        intercept_y = (opponent_pos[1] + apple_pos[1]) // 2
-        return (intercept_x, intercept_y)
+    # Check for alternating between two positions
+    if (history[-1] == history[-3] == history[-5] and 
+        history[-2] == history[-4] == history[-6]):
+        return True
     
-    return None
+    return False
 
 def decide_move(yellow_pos, red_pos, apple_pos, has_immunity=False):
     """Decide the next move based on current game state."""
-    global current_direction
+    global current_direction, position_history
     
     # Convert to grid positions
     yellow_grid = get_grid_position(yellow_pos)
     red_grid = get_grid_position(red_pos)
     apple_grid = get_grid_position(apple_pos) if apple_pos else None
     
+    # Update position history for oscillation detection
+    position_history.append(yellow_grid)
+    if len(position_history) > 10:
+        position_history.pop(0)
+    
     # First, check safe directions to avoid immediate death
-    safe_directions = get_safe_directions(yellow_grid, red_grid, has_immunity)
+    safe_directions = get_safe_directions(yellow_grid, has_immunity)
     
     if not safe_directions:
         print("WARNING: No safe directions available!")
         # Emergency move: try to avoid walls at least
         for direction in directions:
             next_pos = get_next_position(yellow_grid, direction)
+            if is_position_valid(next_pos) and not will_hit_opponent(next_pos):
+                return direction
+                
+        # Absolute last resort: try any valid move that avoids walls
+        for direction in directions:
+            next_pos = get_next_position(yellow_grid, direction)
             if is_position_valid(next_pos):
                 return direction
+                
         return current_direction  # As a last resort
     
     # Strategy 1: If we have immunity, go after the opponent
@@ -190,49 +220,39 @@ def decide_move(yellow_pos, red_pos, apple_pos, has_immunity=False):
         if path and len(path) > 0:
             next_pos = path[0]
             for direction, (dx, dy) in directions.items():
-                if (yellow_grid[0] + dx, yellow_grid[1] + dy) == next_pos:
+                new_pos = (yellow_grid[0] + dx, yellow_grid[1] + dy)
+                if new_pos == next_pos and direction in safe_directions:
                     return direction
     
-    # Strategy 2: If there's an apple, decide whether to go for it
+    # Strategy 2: If there's an apple, go for it using A*
     if apple_grid:
-        # Calculate distances
-        yellow_to_apple = manhattan_distance(yellow_grid, apple_grid)
-        red_to_apple = manhattan_distance(red_grid, apple_grid)
+        print(f"Seeking apple at {apple_grid}")
+        # Use A* to find optimal path avoiding opponent's body
+        path = a_star_search(yellow_grid, apple_grid, has_immunity)
         
-        # If we're closer to the apple than opponent, go for it
-        if yellow_to_apple <= red_to_apple:
-            print(f"APPLE STRATEGY: Going for apple at {apple_grid}")
-            path = a_star_search(yellow_grid, apple_grid, red_grid, has_immunity)
-            if path and len(path) > 0:
-                next_pos = path[0]
-                for direction, (dx, dy) in directions.items():
-                    if (yellow_grid[0] + dx, yellow_grid[1] + dy) == next_pos:
+        if path and len(path) > 0:
+            next_pos = path[0]
+            for direction, (dx, dy) in directions.items():
+                new_pos = (yellow_grid[0] + dx, yellow_grid[1] + dy)
+                if new_pos == next_pos and direction in safe_directions:
+                    print(f"A* path found, moving {direction}")
+                    # Double-check that this direction doesn't hit a wall
+                    if not will_hit_wall(yellow_grid, direction):
                         return direction
         else:
-            # If opponent is closer, try to intercept them
-            intercept_point = calculate_intercept_point(yellow_grid, red_grid, apple_grid)
-            if intercept_point:
-                print(f"INTERCEPT STRATEGY: Intercepting at {intercept_point}")
-                path = a_star_search(yellow_grid, intercept_point, red_grid, has_immunity)
-                if path and len(path) > 0:
-                    next_pos = path[0]
-                    for direction, (dx, dy) in directions.items():
-                        if (yellow_grid[0] + dx, yellow_grid[1] + dy) == next_pos:
-                            return direction
-    
-    # Strategy 3: If we're close to opponent and longer, try to encircle them
-    if manhattan_distance(yellow_grid, red_grid) < 10 and yellow_length > red_length:
-        print("ENCIRCLE STRATEGY: Trying to trap opponent")
-        # Try to find a position that blocks opponent
-        for direction, (dx, dy) in directions.items():
-            # Look for a position that gets us closer to opponent without colliding
-            test_pos = (yellow_grid[0] + dx, yellow_grid[1] + dy)
-            if is_position_safe(test_pos, red_grid, has_immunity) and manhattan_distance(test_pos, red_grid) < manhattan_distance(yellow_grid, red_grid):
+            print("No A* path to apple found!")
+
+    # Strategy 3: Avoid oscillation
+    if is_oscillating(position_history) and apple_grid:
+        print("Detected oscillation, trying alternative movement")
+        for direction in safe_directions:
+            if direction != current_direction and direction != opposite_directions[current_direction]:
+                # Try a different direction to break oscillation
                 return direction
     
     # Strategy 4: If no specific strategy, continue moving safely
     # Prefer continuing in same direction if safe
-    if current_direction in safe_directions:
+    if current_direction in safe_directions and not will_hit_wall(yellow_grid, current_direction):
         return current_direction
     
     # Avoid reversing direction if possible
@@ -242,32 +262,67 @@ def decide_move(yellow_pos, red_pos, apple_pos, has_immunity=False):
         return random.choice(forward_directions)
     
     # If all else fails, choose any safe direction
-    return random.choice(safe_directions)
+    if safe_directions:
+        return random.choice(safe_directions)
+        
+    # Absolute fallback
+    return current_direction
+
+def update_opponent_positions(red_pos):
+    """Update the list of opponent positions."""
+    global opponent_positions, red_length
+    
+    red_grid_pos = get_grid_position(red_pos)
+    
+    # Only add if it's a new position
+    if not opponent_positions or red_grid_pos != opponent_positions[0]:
+        # Add new position to front of list
+        opponent_positions.insert(0, red_grid_pos)
+        
+        # Keep list length equal to opponent's length
+        while len(opponent_positions) > red_length:
+            opponent_positions.pop()
+    
+    # Print opponent positions for debugging
+    print(f"Opponent positions: {opponent_positions}")
+
+def check_apple_eaten(current_apple, previous_apple):
+    """Check if an apple was eaten based on position change."""
+    return previous_apple and current_apple != previous_apple
 
 def process_game_state(data):
     """Process the game state and decide the next move."""
-    global current_direction, yellow_immunity, apple_pos, yellow_head_pos, red_head_pos, yellow_length, red_length
+    global current_direction, yellow_immunity, apple_pos, yellow_head_pos, red_head_pos
+    global yellow_length, red_length, opponent_positions
     
     try:
         # Parse data: yellow head, red head, apple
-        yx1, yy1, yx2, yy2, x1, y1, x2, y2, ax, ay = literal_eval(data)
+        yx1, yy1, yx2, yy2, rx1, ry1, rx2, ry2, ax, ay = literal_eval(data)
         
         # Get center positions
         yellow_center = get_center_position((yx1, yy1, yx2, yy2))
-        red_center = get_center_position((x1, y1, x2, y2))
+        red_center = get_center_position((rx1, ry1, rx2, ry2))
         current_apple_pos = (ax, ay) if ax is not None and ay is not None else None
         
         # Check if an apple was eaten
-        if apple_pos and apple_pos != current_apple_pos:
+        if check_apple_eaten(current_apple_pos, apple_pos):
+            print("APPLE EATEN - PRESERVING RECENT POSITIONS")
+            # Keep only the most recent positions (limited number)
+            if len(opponent_positions) > POSITIONS_TO_KEEP:
+                opponent_positions = opponent_positions[:POSITIONS_TO_KEEP]
+            
             # If the apple was at our previous position, we ate it
-            if manhattan_distance(yellow_center, apple_pos) < SEG_SIZE:
+            if yellow_head_pos and manhattan_distance(yellow_head_pos, apple_pos) < SEG_SIZE:
                 yellow_length += 1
                 yellow_immunity = immunity_period
                 print(f"We ate an apple! Length: {yellow_length}, Immunity: {yellow_immunity}")
             # If the apple was at opponent's position, they ate it
-            elif manhattan_distance(red_center, apple_pos) < SEG_SIZE:
+            elif red_head_pos and manhattan_distance(red_head_pos, apple_pos) < SEG_SIZE:
                 red_length += 1
                 print(f"Opponent ate an apple! Their length: {red_length}")
+        
+        # Update position tracking
+        update_opponent_positions(red_center)
         
         # Update current positions
         apple_pos = current_apple_pos
@@ -276,6 +331,13 @@ def process_game_state(data):
         
         # Decide next move
         next_move = decide_move(yellow_center, red_center, current_apple_pos, has_immunity=(yellow_immunity > 0))
+        
+        # Final safety check - don't let snake hit a wall
+        if will_hit_wall(get_grid_position(yellow_center), next_move):
+            print(f"WARNING: {next_move} would hit wall, finding alternative")
+            safe_dirs = get_safe_directions(get_grid_position(yellow_center), yellow_immunity > 0)
+            if safe_dirs:
+                next_move = random.choice(safe_dirs)
         
         # Update current direction
         if next_move != "Straight":
