@@ -21,13 +21,14 @@ immunity_period = 6
 apple_pos = None
 yellow_head_pos = None
 red_head_pos = None
-yellow_length = 3
-red_length = 3
+yellow_length = 5
+red_length = 5
 position_history = []
+first_move = True  # Flag to detect first move of the game
 
 # Simple opponent body tracking
 opponent_positions = []  # List of previous opponent positions
-POSITIONS_TO_KEEP = 10    # Number of positions to keep after apple is eaten
+POSITIONS_TO_KEEP = 35    # Number of positions to keep after apple is eaten
 
 # Directions and their vector values
 directions = {
@@ -180,14 +181,56 @@ def is_oscillating(history, threshold=3):
     
     return False
 
+def check_edge_proximity(pos):
+    """Check if position is near edge and return safe direction towards center."""
+    x, y = pos
+    
+    # Define safe directions away from edges
+    safe_dirs = []
+    
+    # Check if near left edge
+    if x <= 1:
+        safe_dirs.append("Right")
+    # Check if near right edge
+    elif x >= GRID_WIDTH - 2:
+        safe_dirs.append("Left")
+    
+    # Check if near top edge
+    if y <= 1:
+        safe_dirs.append("Down")
+    # Check if near bottom edge
+    elif y >= GRID_HEIGHT - 2:
+        safe_dirs.append("Up")
+    
+    # If multiple safe directions, prioritize one that moves toward center
+    if len(safe_dirs) > 0:
+        center_x, center_y = GRID_WIDTH // 2, GRID_HEIGHT // 2
+        # Sort directions by which gets closer to center
+        safe_dirs.sort(key=lambda d: manhattan_distance(
+            get_next_position(pos, d), 
+            (center_x, center_y)
+        ))
+        return safe_dirs[0]
+    
+    return None  # No edge issue detected
+
 def decide_move(yellow_pos, red_pos, apple_pos, has_immunity=False):
     """Decide the next move based on current game state."""
-    global current_direction, position_history
+    global current_direction, position_history, first_move
     
     # Convert to grid positions
     yellow_grid = get_grid_position(yellow_pos)
     red_grid = get_grid_position(red_pos)
     apple_grid = get_grid_position(apple_pos) if apple_pos else None
+    
+    # Special handling for first move or when near edge
+    if first_move:
+        first_move = False
+        # Check if starting near edge and current direction would lead out
+        edge_safe_dir = check_edge_proximity(yellow_grid)
+        if edge_safe_dir:
+            print(f"Starting near edge, moving {edge_safe_dir} toward center")
+            return edge_safe_dir
     
     # Update position history for oscillation detection
     position_history.append(yellow_grid)
@@ -280,11 +323,11 @@ def update_opponent_positions(red_pos):
         opponent_positions.insert(0, red_grid_pos)
         
         # Keep list length equal to opponent's length
-        while len(opponent_positions) > red_length:
-            opponent_positions.pop()
+        # while len(opponent_positions) > red_length:
+        #     opponent_positions.pop()
     
     # Print opponent positions for debugging
-    print(f"Opponent positions: {opponent_positions}")
+    print(f"OPPONENT POSITION: {opponent_positions}")
 
 def check_apple_eaten(current_apple, previous_apple):
     """Check if an apple was eaten based on position change."""
@@ -303,6 +346,13 @@ def process_game_state(data):
         yellow_center = get_center_position((yx1, yy1, yx2, yy2))
         red_center = get_center_position((rx1, ry1, rx2, ry2))
         current_apple_pos = (ax, ay) if ax is not None and ay is not None else None
+        
+        # First thing: Check if we're at edge and need to move away
+        yellow_grid = get_grid_position(yellow_center)
+        edge_safe_dir = check_edge_proximity(yellow_grid)
+        if edge_safe_dir:
+            print(f"Near edge, prioritizing movement {edge_safe_dir} toward center")
+            current_direction = edge_safe_dir
         
         # Check if an apple was eaten
         if check_apple_eaten(current_apple_pos, apple_pos):
@@ -333,9 +383,9 @@ def process_game_state(data):
         next_move = decide_move(yellow_center, red_center, current_apple_pos, has_immunity=(yellow_immunity > 0))
         
         # Final safety check - don't let snake hit a wall
-        if will_hit_wall(get_grid_position(yellow_center), next_move):
+        if will_hit_wall(yellow_grid, next_move):
             print(f"WARNING: {next_move} would hit wall, finding alternative")
-            safe_dirs = get_safe_directions(get_grid_position(yellow_center), yellow_immunity > 0)
+            safe_dirs = get_safe_directions(yellow_grid, yellow_immunity > 0)
             if safe_dirs:
                 next_move = random.choice(safe_dirs)
         
@@ -373,7 +423,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 start_time = time.time()
                 decoded_data = data.decode()
                 print(f"Received: {decoded_data}")
-                
+                # print("OPPONENT POSITION:", opponent_positions)
                 # Process game state and determine next move
                 next_move = process_game_state(decoded_data)
                 
